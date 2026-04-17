@@ -1,0 +1,20 @@
+# Executáveis
+*.exe
+*.out
+
+# Objetos e arquivos de compilação
+*.o
+*.obj
+*.a
+*.lib
+
+# VS Code
+.vscode/
+
+# Arquivos de debug
+*.pdb
+*.ilk
+
+# Arquivos gerados pelo Windows
+Thumbs.db
+desktop.ini
