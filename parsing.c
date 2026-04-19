@@ -1,22 +1,23 @@
 #include <stdio.h>
 #include "mpc.h"
 
-
+// uma lval representa qualquer um dos valores que a linguagem pode manipular
+// a tipagem mutuamente exclusiva é análoga a implementação "manual" de uma union
 typedef struct lval{
-    int type;
+    int type; // representa o tipo de valor da lval, sumarizados em enum
     long num;
 
     char* err;
     char* sym;
 
-    int count;
-    struct lval** cell;
+    int count; //contagem de filhos
+    struct lval** cell; // ponteiro para ponteiros de lval: cada ponteiro apontado representa um filho
 } lval;
 
-enum {LVAL_ERR, LVAL_NUM, LVAL_SYM, LVAL_SEXPR};
-enum {LERR_DIV_ZERO, LERR_BAD_OP, LERR_BAD_NUM};
+enum {LVAL_ERR, LVAL_NUM, LVAL_SYM, LVAL_SEXPR}; // identificadores de tipo
+enum {LERR_DIV_ZERO, LERR_BAD_OP, LERR_BAD_NUM}; // identificadores de erro
 
-
+//forward declarations: resolve a dependência circular entre funções
 lval* lval_add(lval* v, lval* x);
 void lval_print(lval* v);
 lval* lval_eval(lval* v);
@@ -24,6 +25,7 @@ lval* lval_pop(lval* v, int i);
 lval* lval_take(lval* v, int i);
 lval* builtin_op(lval* a, char* op);
 
+// cria uma lval de tipo número e atribui o valor
 lval* lval_num(long x){
     lval* v = malloc(sizeof(lval));
     v->type = LVAL_NUM;
@@ -31,6 +33,7 @@ lval* lval_num(long x){
     return v;
 }
 
+// cria uma lval de tipo erro e atribui uma string à sua chamada
 lval* lval_err(char* m){
     lval* v = malloc(sizeof(lval));
     v->type = LVAL_ERR;
@@ -39,6 +42,7 @@ lval* lval_err(char* m){
     return v;
 }
 
+// cria uma lval de tipo symbol e atribui o operador relativo ao campo
 lval* lval_sym(char *s){
     lval* v = malloc(sizeof(lval));
     v->type = LVAL_SYM;
@@ -47,6 +51,7 @@ lval* lval_sym(char *s){
     return v;
 }
 
+//cria uma lval de tipo sexpr e inicia o vetor de filhos em NULL
 lval* lval_sexpr(void){
     lval *v = malloc(sizeof(lval));
     v->type = LVAL_SEXPR;
@@ -55,27 +60,46 @@ lval* lval_sexpr(void){
     return v;
 }
 
+// elimina uma lval e desaloca seu espaço e das informações extras aninhadas
 void lval_del(lval* v){
     switch (v->type)
     {
-    case LVAL_NUM: break;
-    case LVAL_ERR: free(v->err); break;
-    case LVAL_SYM: free(v->sym); break;
+    case LVAL_NUM: break; // o caso num não possui informação extra
+    case LVAL_ERR: free(v->err); break; // o caso erro possui mensagem 
+    case LVAL_SYM: free(v->sym); break; // o caso simboolo possui o caractere
 
-    case LVAL_SEXPR:
+    case LVAL_SEXPR: // o caso sexpr há de liberar memória dos ponteiros para lval
+    // além do ponteiros que os aponta (cell).
         for(int i = 0; i < v->count; i++){
             lval_del(v->cell[i]);
         }
         free(v->cell);
     break;
     }
-    free(v);
+    free(v); // libera memória da struct lval
 }
 
+// tenta converter a string do nó da árvore para long e retorna lval_err se o número for
+// grande demais, ou lval_num se a conversão for bem sucedida.
+
+/*a biblioteca mpc oferece a struct da árvore sintatica. o input do usuario é uma string. 
+a medida que se "destrincha" a string, aparecerá a necessidade de compreender tal como um 
+número, quando assim for identificado*/
+
 lval* lval_read_num(mpc_ast_t* t){
-    errno = 0;
-    long x = strtol(t->contents, NULL, 10);
+/*
+mpc_ast_t é a struct da biblioteca mpc que representa um nó da árvore sintática:
+;o resultado do parsing.
+*/ 
+    errno = 0; // variável global especial definida em <errno.h> que funções da biblioteca
+//padrão usam para reportar erros. Zeramos-a a fim de validá-la segundo apenas a validação
+//de strtol, e não qualquer outra chamada anterior.
+    long x = strtol(t->contents, NULL, 10); // converte uma string para long (string to long)
+// os três parâmetros são: string alvo, ponteiro para o ponto de parada e a base numérica.
     return errno != ERANGE ? lval_num(x) : lval_err("invalid number");
+// ERANGE é uma cosntante de <errno.h> que siginifica _error range_: aponta se o valor não
+// cabe no tipo de destino.
+ 
 }
 
 lval* lval_read(mpc_ast_t* t){
@@ -83,10 +107,15 @@ lval* lval_read(mpc_ast_t* t){
     if(strstr(t->tag, "symbol")) { return lval_sym(t->contents); }
     
     lval* x = NULL;
-    if (strcmp(t->tag, ">") == 0) { x = lval_sexpr();}
-    if (strcmp(t->tag, "sexpr")) { x = lval_sexpr();}
+    // determina o nó raiz como uma expressão de expressões aninhadas. 
+    if (strcmp(t->tag, ">") == 0) { x = lval_sexpr();} // ">" corresponde à convenção interna
+// da biblioteca de tag para nó raíz da árvore sintática.
+    // determina qualquer nó de tag sexpr como tal.
+    if (strstr(t->tag, "sexpr")) { x = lval_sexpr();}
 
     for (int i = 0; i < t->children_num; i++){
+        // adiciona os nós filhos da sexpr
+        //ignora tokens estruturais, adiciona apenas nós com valor semânticos
         if(strcmp (t->children[i]->contents, "(") == 0) {continue;}
         if(strcmp (t->children[i]->contents, ")") == 0) {continue;}
         if(strcmp (t->children[i]->tag, "regex") == 0)  {continue;}
@@ -95,13 +124,15 @@ lval* lval_read(mpc_ast_t* t){
     return x;
 }
 
+// adiciona um nó filho
 lval* lval_add(lval* v, lval *x){
     v->count++;
-    v->cell = realloc(v->cell, sizeof(lval*) * v->count);
-    v->cell[v->count-1] = x;
+    v->cell = realloc(v->cell, sizeof(lval*) * v->count); // realoca espaço para contê-lo
+    v->cell[v->count-1] = x; // insere x como filho de v
     return v;
 }
 
+// imprime os filhos de v separados por espaço, entre os delimitadores open e close
 void lval_expr_print(lval* v, char open, char close){
     putchar(open);
     for(int i =0; i< v->count; i++){
@@ -114,6 +145,7 @@ void lval_expr_print(lval* v, char open, char close){
     putchar(close);
 }
 
+// seleciona a informação a ser printada segundo o tipo da lval
 void lval_print(lval *v){
     switch (v->type){
     case LVAL_NUM:    printf("%li", v->num);        break;
@@ -123,10 +155,13 @@ void lval_print(lval *v){
     }
 }
 
+//wrapper para print no terminal
 void lval_println(lval* v) { lval_print(v); putchar('\n'); }
+
 
 lval* lval_eval_sexpr(lval *v){
     for(int i =0; i < v->count; i++){
+        // mapeia cada nó filho da sexpr para seu valor
         v->cell[i] = lval_eval(v->cell[i]);
     }
 
@@ -139,11 +174,13 @@ lval* lval_eval_sexpr(lval *v){
     if(v->count == 1){return lval_take(v, 0);}
 
     lval *f = lval_pop(v, 0);
+    //trata o caso de expressão não iniada com operador (padrão notaçao polonesa)
     if(f->type != LVAL_SYM){
         lval_del(f); lval_del(v);
         return lval_err("S-expression does not start with a symbol");
     }
 
+    // extrai o segmento de sexpr e seu primeiro operador (f->sym)
     lval* result = builtin_op(v, f->sym);
     lval_del(f);
     return result;
@@ -154,6 +191,7 @@ lval* lval_eval(lval *v){
     return v;
 }
 
+// remove o filho na posição i de v e o retorna, mantendo o restante
 lval* lval_pop(lval *v, int i){
     lval* x = v->cell[i];
 
@@ -165,12 +203,14 @@ lval* lval_pop(lval *v, int i){
     return x;
 }
 
+// retorna o filho de posição i e descarta todo o resto
 lval* lval_take(lval*v, int i){
     lval* x = lval_pop(v, i);
     lval_del(v);
     return x;
 }
 
+//recebe uma lista completamente avaliada
 lval* builtin_op(lval *a, char *op){
     for(int i = 0; i < a->count; i++){
         if(a->cell[i]->type != LVAL_NUM){
@@ -179,14 +219,16 @@ lval* builtin_op(lval *a, char *op){
         }
     }
 
+    // recebe o primeiro operando
     lval* x = lval_pop(a, 0);
 
+    // opera o "-" unário
     if ((strcmp(op, "-") == 0) && a->count == 0){
         x->num = -x->num;
     }
 
     while(a->count > 0){
-
+        //toma o próximo operando
         lval* y = lval_pop(a, 0);
 
         if (strcmp(op, "+") == 0) {x->num += y->num;}
@@ -210,12 +252,14 @@ static char input[2048];
 
 int main(int argc, char** argv){
 
+    // parsers para cada categoria gramatical
     mpc_parser_t* Number    = mpc_new("number");
     mpc_parser_t* Symbol    = mpc_new("symbol");
     mpc_parser_t* Sexpr     = mpc_new("sexpr");
     mpc_parser_t* Expr      = mpc_new("expr");
     mpc_parser_t* OLisp     = mpc_new("olisp");
 
+    // especifica a representação das classes sintáticas
     mpca_lang(MPCA_LANG_DEFAULT,
         "                                                       \
         number      : /-?[0-9]+/ ;                              \
@@ -229,15 +273,17 @@ int main(int argc, char** argv){
     puts("OLisp Version 0.0.0.1");
     puts("Press Ctrl+c to Exit\n");
 
-    while(1){
+    while(1){ // REPL
         fputs("olisp>" , stdout);
         fgets(input, 2048, stdin);
 
         mpc_result_t r;
+        //tenta parsear o input segundo a gramática OLisp e, se bem sucedido, preenche
+        // r.output com a árvore sintática.
         if(mpc_parse("<stdin>", input, OLisp, &r)){
-            lval* x = lval_eval(lval_read(r.output));
-            lval_println(x);
-            lval_del(x);
+            lval* x = lval_eval(lval_read(r.output)); // converte a árvore sintática em uma lval
+            lval_println(x); // imprime o resultado
+            lval_del(x); // libera a memória
         } else {
             mpc_err_print(r.error);
             mpc_err_delete(r.error);
