@@ -1,6 +1,9 @@
 #include <stdio.h>
 #include "mpc.h"
 
+#define LASSERT(args, cond, err) \
+    if(!(cond)) {lval_del(args); return lval_err(err);}
+
 // uma lval representa qualquer um dos valores que a linguagem pode manipular
 // a tipagem mutuamente exclusiva é análoga a implementação "manual" de uma union
 typedef struct lval{
@@ -14,7 +17,7 @@ typedef struct lval{
     struct lval** cell; // ponteiro para ponteiros de lval: cada ponteiro apontado representa um filho
 } lval;
 
-enum {LVAL_ERR, LVAL_NUM, LVAL_SYM, LVAL_SEXPR}; // identificadores de tipo
+enum {LVAL_ERR, LVAL_NUM, LVAL_SYM, LVAL_SEXPR, LVAL_QEXPR }; // identificadores de tipo
 enum {LERR_DIV_ZERO, LERR_BAD_OP, LERR_BAD_NUM}; // identificadores de erro
 
 //forward declarations: resolve a dependência circular entre funções
@@ -24,6 +27,14 @@ lval* lval_eval(lval* v);
 lval* lval_pop(lval* v, int i);
 lval* lval_take(lval* v, int i);
 lval* builtin_op(lval* a, char* op);
+
+lval* builtin(lval* a, char* func);
+lval* builtin_head(lval* a);
+lval* builtin_tail(lval* a);
+lval* builtin_list(lval* a);
+lval* builtin_eval(lval* a);
+lval* builtin_join(lval* a);
+lval* lval_join(lval* x, lval* y);
 
 // cria uma lval de tipo número e atribui o valor
 lval* lval_num(long x){
@@ -60,6 +71,15 @@ lval* lval_sexpr(void){
     return v;
 }
 
+//cria um ponteiro para uma nova lval Qexpr vazia
+lval* lval_qexpr(void){
+    lval* v = malloc(sizeof(lval));
+    v->type = LVAL_QEXPR;
+    v->count = 0;
+    v->cell = NULL;
+    return v;
+}
+
 // elimina uma lval e desaloca seu espaço e das informações extras aninhadas
 void lval_del(lval* v){
     switch (v->type)
@@ -68,6 +88,8 @@ void lval_del(lval* v){
     case LVAL_ERR: free(v->err); break; // o caso erro possui mensagem 
     case LVAL_SYM: free(v->sym); break; // o caso simboolo possui o caractere
 
+    // se é Qexpr ou Sexpr delete todos os elementos internos
+    case LVAL_QEXPR:
     case LVAL_SEXPR: // o caso sexpr há de liberar memória dos ponteiros para lval
     // além do ponteiros que os aponta (cell).
         for(int i = 0; i < v->count; i++){
@@ -76,6 +98,7 @@ void lval_del(lval* v){
         free(v->cell);
     break;
     }
+
     free(v); // libera memória da struct lval
 }
 
@@ -103,7 +126,7 @@ mpc_ast_t é a struct da biblioteca mpc que representa um nó da árvore sintát
 }
 
 lval* lval_read(mpc_ast_t* t){
-    if(strstr(t->tag, "number")) { return lval_read_num(t);}
+    if(strstr(t->tag, "number")) { return lval_read_num(t);      }
     if(strstr(t->tag, "symbol")) { return lval_sym(t->contents); }
     
     lval* x = NULL;
@@ -112,12 +135,15 @@ lval* lval_read(mpc_ast_t* t){
 // da biblioteca de tag para nó raíz da árvore sintática.
     // determina qualquer nó de tag sexpr como tal.
     if (strstr(t->tag, "sexpr")) { x = lval_sexpr();}
+    if (strstr(t->tag, "qexpr")) { x = lval_qexpr();}
 
     for (int i = 0; i < t->children_num; i++){
         // adiciona os nós filhos da sexpr
         //ignora tokens estruturais, adiciona apenas nós com valor semânticos
         if(strcmp (t->children[i]->contents, "(") == 0) {continue;}
         if(strcmp (t->children[i]->contents, ")") == 0) {continue;}
+        if(strcmp (t->children[i]->contents, "{") == 0) {continue;}
+        if(strcmp (t->children[i]->contents, "}") == 0) {continue;}
         if(strcmp (t->children[i]->tag, "regex") == 0)  {continue;}
         x = lval_add(x, lval_read(t->children[i]));
     }
@@ -148,10 +174,11 @@ void lval_expr_print(lval* v, char open, char close){
 // seleciona a informação a ser printada segundo o tipo da lval
 void lval_print(lval *v){
     switch (v->type){
-    case LVAL_NUM:    printf("%li", v->num);        break;
-    case LVAL_ERR:    printf("Error: %s", v->err);  break;
-    case LVAL_SYM:    printf("%s", v->sym);         break;
-    case LVAL_SEXPR:  lval_expr_print(v, '(', ')'); break;
+    case LVAL_NUM   :    printf("%li", v->num);        break;
+    case LVAL_ERR   :    printf("Error: %s", v->err);  break;
+    case LVAL_SYM   :    printf("%s", v->sym);         break;
+    case LVAL_SEXPR :    lval_expr_print(v, '(', ')'); break;
+    case LVAL_QEXPR :    lval_expr_print(v, '{', '}'); break;
     }
 }
 
@@ -181,7 +208,7 @@ lval* lval_eval_sexpr(lval *v){
     }
 
     // extrai o segmento de sexpr e seu primeiro operador (f->sym)
-    lval* result = builtin_op(v, f->sym);
+    lval* result = builtin(v, f->sym);
     lval_del(f);
     return result;
 }
@@ -195,6 +222,7 @@ lval* lval_eval(lval *v){
 lval* lval_pop(lval *v, int i){
     lval* x = v->cell[i];
 
+    //desloca os elementos da array em uma posição para a esquerda
     memmove(&v->cell[i], &v->cell[i+1], sizeof(lval*) * (v->count-i-1));
 
     v->count--;
@@ -207,6 +235,82 @@ lval* lval_pop(lval *v, int i){
 lval* lval_take(lval*v, int i){
     lval* x = lval_pop(v, i);
     lval_del(v);
+    return x;
+}
+
+// toma a head da q-expression
+lval* builtin_head(lval* a){
+    LASSERT(a, a->count == 1,
+        "Function 'head' passed too many arguments!");
+
+    LASSERT(a, a->cell[0]->type == LVAL_QEXPR,
+        "Function 'head' passed incorrect type.");
+
+    LASSERT(a, a->cell[0]->count != 0,
+        "Function 'head' passed {}");
+
+    lval* v = lval_take(a, 0);
+
+    while (v->count > 1) {lval_del(lval_pop(v, 1)); }
+    return v;
+}
+
+lval* builtin_tail(lval* a){
+    LASSERT(a, a->count == 1,
+        "Function 'tail' passed too many arguments!");
+
+    LASSERT(a, a->cell[0]->type == LVAL_QEXPR,
+        "Function 'tail' passed incorrect type.");
+
+    LASSERT(a, a->cell[0]->count != 0,
+        "Function 'tail' passed {}");
+
+    lval* v = lval_take(a, 0);
+
+    lval_del(lval_pop(v, 0));
+    return v;
+}
+
+//converte uma S-expression numa Q-expression
+lval* builtin_list(lval* a){
+    a->type = LVAL_QEXPR;
+    return a;
+}
+
+// toma uma q-expression e converte numa s-expression e a evalua
+lval* builtin_eval(lval* a){
+    LASSERT(a, a->count == 1,
+        "Function 'eval' passed too many arguments!");
+    LASSERT(a, a->cell[0]->type,
+        "Function 'eval' passed incorrect type.");
+    lval* x = lval_take(a, 0);
+    x->type = LVAL_SEXPR;
+    return lval_eval(x);
+}
+
+lval* builtin_join(lval *a){
+    for(int i = 0; i < a->count; i++){
+        LASSERT(a, a->cell[i]->type == LVAL_QEXPR,
+            "Function 'join' passed incorrect type.");
+    }
+
+    lval* x = lval_pop(a, 0);
+
+    while(a->count){
+        x = lval_join(x, lval_pop(a, 0));
+    }
+
+    lval_del(a);
+    return x;
+}
+
+lval* lval_join(lval* x, lval* y){
+    // adicionar cada célula de y para x
+    while(y->count){
+        x = lval_add(x, lval_pop(y, 0));
+    }
+
+    lval_del(y);
     return x;
 }
 
@@ -248,6 +352,17 @@ lval* builtin_op(lval *a, char *op){
     lval_del(a); return x;
 }
 
+lval* builtin(lval *a, char* func){
+    if(strcmp("list", func) == 0) {return builtin_list(a);}
+    if(strcmp("head", func) == 0) {return builtin_head(a);}
+    if(strcmp("tail", func) == 0) {return builtin_tail(a);}
+    if(strcmp("join", func) == 0) {return builtin_join(a);}
+    if(strcmp("eval", func) == 0) {return builtin_eval(a);}
+    if(strstr("+-/*", func))      {return builtin_op(a, func);}
+    lval_del(a);
+    return lval_err("Unknown function");
+}
+
 static char input[2048];
 
 int main(int argc, char** argv){
@@ -256,19 +371,22 @@ int main(int argc, char** argv){
     mpc_parser_t* Number    = mpc_new("number");
     mpc_parser_t* Symbol    = mpc_new("symbol");
     mpc_parser_t* Sexpr     = mpc_new("sexpr");
+    mpc_parser_t* Qexpr     = mpc_new("qexpr");
     mpc_parser_t* Expr      = mpc_new("expr");
     mpc_parser_t* OLisp     = mpc_new("olisp");
 
     // especifica a representação das classes sintáticas
     mpca_lang(MPCA_LANG_DEFAULT,
-        "                                                       \
-        number      : /-?[0-9]+/ ;                              \
-        symbol      : '+' | '-' | '*' | '/' ;                   \
-        sexpr       : '(' <expr>* ')' ;                         \
-        expr        : <number> | <symbol> | <sexpr> ;           \
-        olisp       : /^/ <expr>* /$/ ;                         \
+        "                                                           \
+        number : /-?[0-9]+/ ;                                       \
+        symbol : \"list\" | \"head\" | \"tail\"                     \
+               | \"join\" | \"eval\" | '+' | '-' | '*' | '/' ; \
+        sexpr  : '(' <expr>* ')' ;                                  \
+        qexpr  : '{' <expr>* '}' ;                                  \
+        expr   : <number> | <symbol> | <sexpr> | <qexpr> ;          \
+        olisp  : /^/ <expr>* /$/ ;                                  \
         ", 
-        Number, Symbol, Sexpr, Expr, OLisp);
+        Number, Symbol, Sexpr, Qexpr, Expr, OLisp);
 
     puts("OLisp Version 0.0.0.1");
     puts("Press Ctrl+c to Exit\n");
@@ -290,7 +408,7 @@ int main(int argc, char** argv){
         }
     }
 
-    mpc_cleanup(5, Number, Symbol, Sexpr, Expr, OLisp);
+    mpc_cleanup(6, Number, Symbol, Sexpr, Qexpr, Expr, OLisp);
 
     return 0;
 }
