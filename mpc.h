@@ -22,9 +22,6 @@ extern "C" {
 #include <errno.h>
 #include <ctype.h>
 
-#include <readline/readline.h>
-#include <readline/history.h>
-
 /*
 ** State Type
 */
